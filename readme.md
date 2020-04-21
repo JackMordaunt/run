@@ -4,6 +4,16 @@
 
 run is an _extremely_ minimal task runner that supports a shell-lite syntax.
 
+## Install   
+
+```
+git clone https://github.com/jackmordaunt/run
+cd run
+cargo install --path .
+```
+
+## Use  
+
 An example run file:
 
 ```
@@ -34,7 +44,8 @@ echo $1 $2 $3
 echo $foo $bar $baz
 ```
 
-Remarks  
+## Remarks
+  
 - For personal use (experimental, use at your own risk).    
 - Highly portable because it's minimal.   
 - Sick of looking at powershell, bash, make, and co.  
