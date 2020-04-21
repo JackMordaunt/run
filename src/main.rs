@@ -85,7 +85,7 @@ fn main() {
                                         // Basically, if arg is "$<numeric>" we parse
                                         // the number and lookup the corresponding positional argument.
                                         // If arg is "$<identifier>" we lookup the named argument.
-                                        // If either one doesn't exist we through up an error.
+                                        // If either one doesn't exist we throw up an error.
 
                                         if arg.starts_with('$') {
                                             if let Ok(index) = arg
@@ -213,7 +213,7 @@ impl FromIterator<String> for Environment {
         // Iterate over each argument.
         // If an argument appears like "-Flag value", create a named argument.
         // Else put the arg in positional vector.
-        // Note: Named arguments must have a value.HashMap
+        // Note: Named arguments must have a value.
 
         while let Some(arg) = iter.next() {
             if arg.starts_with("-") {
