@@ -31,9 +31,9 @@ fn main() {
     let mut file: String = String::new();
     let mut args = env::args().skip(1).peekable();
 
-    if let Some(run_file) = args.next() {
+    if let Some(mut run_file) = args.next() {
         if !run_file.ends_with(".run") {
-            panic!("no .run file provided");
+            run_file.push_str(".run");
         }
         File::open(run_file)
             .expect("opening run file")
@@ -43,12 +43,15 @@ fn main() {
 
     let environment: Environment = args
         .fold(String::new(), |mut buf, next| {
+            buf.push(' ');
             buf.extend(next.chars());
             buf
         })
         .parse()
         .map_err(|e| format!("parsing environment: {}", e))
         .unwrap();
+
+    dbg!(&environment);
 
     let items = ItemParser { env: &environment }
         .parse(&file)
@@ -131,12 +134,18 @@ impl FromStr for Environment {
             positional: Vec::new(),
         };
 
-        let mut iter = s.split_whitespace().map(String::from);
+        let mut iter = SplitWords { src: s.chars() }
+            .map(String::from)
+            .collect::<Vec<_>>();
+
+        dbg!(&iter);
 
         // Iterate over each argument.
         // If an argument appears like "-Flag value", create a named argument.
         // Else put the arg in positional vector.
         // Note: Named arguments must have a value.
+
+        let mut iter = iter.into_iter();
 
         while let Some(arg) = iter.next() {
             if arg.starts_with("-") {
@@ -196,7 +205,9 @@ impl<'a> ItemParser<'a> {
     // Parse a pipeline of commands into a pipeline structure.
     fn parse_pipeline(&self, fragment: &str) -> Result<Item, String> {
         let mut cmds: Vec<Cmd> = vec![];
-        let mut words = fragment.split_whitespace();
+        let mut words = SplitWords {
+            src: fragment.chars(),
+        };
 
         if let Some(name) = words.next() {
             let cmd = Cmd {
@@ -270,4 +281,48 @@ fn rm(pattern: &str) -> Result<(), Box<dyn Error>> {
         .map(|entry| std::fs::remove_file(&entry))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(())
+}
+
+// SplitWords implements a custom definition of "word" that includes "delimited
+// by whitespace, unless inside a string literal".
+#[derive(Debug)]
+struct SplitWords<Src>
+where
+    Src: Iterator<Item = char>,
+{
+    src: Src,
+}
+
+impl<Src> Iterator for SplitWords<Src>
+where
+    Src: Iterator<Item = char>,
+{
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut word = String::new();
+        while let Some(next) = self.src.next() {
+            if next.is_whitespace() {
+                // No point returning empty words.
+                if word.is_empty() {
+                    continue;
+                } else {
+                    return Some(word);
+                }
+            } else {
+                // Grab string literals as a single word, regardless of white
+                // space.
+                if next == '"' {
+                    while let Some(next) = self.src.next() {
+                        if next == '"' {
+                            return Some(word);
+                        }
+                        word.push(next);
+                    }
+                }
+                word.push(next);
+            }
+        }
+        None
+    }
 }
