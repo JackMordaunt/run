@@ -13,14 +13,15 @@
 //! - Support Serde on top of "custom" format?
 //! - Shell interface (basically, a loop with a prompt).
 //!
+
 use glob::glob;
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::prelude::*;
-use std::iter::FromIterator;
 use std::process::{Child, Command, Stdio};
+use std::str::FromStr;
 
 fn main() {
     // TODO(jfm): Handle multiple ".run" files.
@@ -51,7 +52,14 @@ fn main() {
             .expect("reading run file");
     }
 
-    let environment: Environment = args.collect();
+    let environment: Environment = args
+        .fold(String::new(), |mut buf, next| {
+            buf.extend(next.chars());
+            buf
+        })
+        .parse()
+        .map_err(|e| format!("parsing: {}", e))
+        .unwrap();
 
     // Parsing is done very simple, line-wise then pipe-wise.
     //
@@ -199,16 +207,16 @@ struct Environment {
     positional: Vec<String>,
 }
 
-impl FromIterator<String> for Environment {
-    fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
+impl FromStr for Environment {
+    type Err = Box<dyn Error>;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut env = Environment {
             named: HashMap::new(),
             positional: Vec::new(),
         };
 
-        let mut iter = iter.into_iter();
-
-        // TODO(jfm): Make falllible with `FromStr` impl?
+        let mut iter = s.split_whitespace().map(String::from);
 
         // Iterate over each argument.
         // If an argument appears like "-Flag value", create a named argument.
@@ -220,7 +228,7 @@ impl FromIterator<String> for Environment {
                 let name = arg.trim_matches('-').to_owned();
                 if let Some(value) = iter.next() {
                     if value.starts_with("-") {
-                        panic!("{} is missing a value", name);
+                        return Err(format!("{} is missing a value", name).into());
                     }
                     env.named.insert(name, value);
                 }
@@ -229,7 +237,7 @@ impl FromIterator<String> for Environment {
             }
         }
 
-        env
+        Ok(env)
     }
 }
 
