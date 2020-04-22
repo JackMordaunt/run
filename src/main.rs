@@ -47,88 +47,14 @@ fn main() {
             buf
         })
         .parse()
-        .map_err(|e| format!("parsing: {}", e))
+        .map_err(|e| format!("parsing environment: {}", e))
         .unwrap();
 
-    // Parsing is done very simple, line-wise then pipe-wise.
-    //
-    // Single command on a line:
-    //  command arg\n
-    //
-    // Multiple commands piped:
-    // Obviously, stdout of each command gets piped into stdin of the next.
-    //
-    //  command arg | command arg | command arg\n
-    //  ^----------^ ^-----------^ ^------------^
+    let items = ItemParser { env: &environment }
+        .parse(&file)
+        .map_err(|e| format!("parsing commands: {}", e))
+        .unwrap();
 
-    let items = file.lines().filter_map(|line| {
-        if line.starts_with("//") {
-            Some(Item::Comment(line.to_owned()))
-        } else {
-            Some(Item::Pipeline {
-                literal: line.to_owned(),
-                cmds: line
-                    .split("|")
-                    .filter_map(|cmd| {
-                        let mut words = cmd.split_whitespace();
-                        if let Some(name) = words.next() {
-                            Some(Cmd {
-                                name: name.to_owned(),
-                                args: words
-                                    .map(String::from)
-                                    .map(|arg| {
-                                        // TODO(jfm): Proper error handling.
-
-                                        // Basically, if arg is "$<numeric>" we parse
-                                        // the number and lookup the corresponding positional argument.
-                                        // If arg is "$<identifier>" we lookup the named argument.
-                                        // If either one doesn't exist we throw up an error.
-
-                                        if arg.starts_with('$') {
-                                            if let Ok(index) = arg
-                                                .chars()
-                                                .skip(1)
-                                                .next()
-                                                .unwrap()
-                                                .to_string()
-                                                .parse::<usize>()
-                                            {
-                                                match environment.positional.get(index - 1) {
-                                                    Some(v) => v.to_owned(),
-                                                    None => {
-                                                        panic!(
-                                                            "no positional argument given for ${}",
-                                                            index
-                                                        );
-                                                    }
-                                                }
-                                            } else {
-                                                match environment.named.get(arg.trim_matches('$')) {
-                                                    Some(v) => v.to_owned(),
-                                                    None => {
-                                                        panic!(
-                                                    "no value specified for named argument: {}",
-                                                    arg
-                                                );
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            arg
-                                        }
-                                    })
-                                    .collect(),
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            })
-        }
-    });
-
-    // Once we have a list of items, we can now execute them.
     for item in items {
         match item {
             Item::Comment(comment) => {
@@ -227,6 +153,99 @@ impl FromStr for Environment {
         }
 
         Ok(env)
+    }
+}
+
+struct ItemParser<'a> {
+    env: &'a Environment,
+}
+
+// Parsing is done very simple, line-wise, semicolon-wise, then pipe-wise.
+//
+// Single command on a line:
+//  command arg\n
+//
+// Multiple commands piped:
+// Obviously, stdout of each command gets piped into stdin of the next.
+//
+//  command arg | command arg | command arg ; final_command\n
+//  ^---------^   ^---------^   ^---------^   ^-----------^
+//
+// Only the actual command parsing requires the environment.
+impl<'a> ItemParser<'a> {
+    // Parse a string buffer into a list of command items.
+    // Note: Reports the first error encountered and discards the rest.
+    fn parse(&self, s: &str) -> Result<Vec<Item>, String> {
+        Ok(s.lines()
+            .map(|s| {
+                if s.starts_with("//") {
+                    Ok(vec![Item::Comment(s.into())])
+                } else {
+                    s.split(";")
+                        .map(|s| s.split("|"))
+                        .flatten()
+                        .map(|s| self.parse_pipeline(s))
+                        .collect()
+                }
+            })
+            .collect::<Result<Vec<Vec<Item>>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+    // Parse a pipeline of commands into a pipeline structure.
+    fn parse_pipeline(&self, fragment: &str) -> Result<Item, String> {
+        let mut cmds: Vec<Cmd> = vec![];
+        let mut words = fragment.split_whitespace();
+
+        if let Some(name) = words.next() {
+            let cmd = Cmd {
+                name: name.to_owned(),
+                args: words
+                    .map(String::from)
+                    .map(|arg| {
+                        // Basically, if arg is "$<numeric>" we parse
+                        // the number and lookup the corresponding positional argument.
+                        // If arg is "$<identifier>" we lookup the named argument.
+                        // If either one doesn't exist we throw up an error.
+
+                        if arg.starts_with('$') {
+                            if let Ok(index) = arg
+                                .chars()
+                                .skip(1)
+                                .next()
+                                .unwrap()
+                                .to_string()
+                                .parse::<usize>()
+                            {
+                                match self.env.positional.get(index - 1) {
+                                    Some(v) => Ok(v.to_owned()),
+                                    None => {
+                                        Err(format!("no positional argument given for ${}", index))
+                                    }
+                                }
+                            } else {
+                                match self.env.named.get(arg.trim_matches('$')) {
+                                    Some(v) => Ok(v.to_owned()),
+                                    None => Err(format!(
+                                        "no value specified for named argument: {}",
+                                        arg
+                                    )),
+                                }
+                            }
+                        } else {
+                            Ok(arg)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            cmds.push(cmd);
+        }
+
+        Ok(Item::Pipeline {
+            cmds: cmds,
+            literal: fragment.trim().into(),
+        })
     }
 }
 
