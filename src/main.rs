@@ -31,21 +31,10 @@ fn main() {
     let mut file: String = String::new();
     let mut args = env::args().skip(1).peekable();
 
-    // Note: If no ".run" is specified, then we rely on glob to pick the first
-    // one it sees. May not be deterministic... Is it worth the convenience?
-    if let Some(first) = args.peek() {
-        let run_file = if !first.ends_with(".run") {
-            glob("*.run")
-                .expect("bad glob pattern")
-                .next()
-                .expect("no entries")
-                .expect("path error")
-        } else {
-            match args.next() {
-                Some(arg) => arg.into(),
-                None => panic!("no script name provided"),
-            }
-        };
+    if let Some(run_file) = args.next() {
+        if !run_file.ends_with(".run") {
+            panic!("no .run file provided");
+        }
         File::open(run_file)
             .expect("opening run file")
             .read_to_string(&mut file)
