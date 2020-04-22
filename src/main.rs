@@ -41,17 +41,19 @@ fn main() {
             .expect("reading run file");
     }
 
-    let environment: Environment = args
-        .fold(String::new(), |mut buf, next| {
-            buf.push(' ');
-            buf.extend(next.chars());
-            buf
-        })
+    // Wrap each unique argument in quotes for the environment parser.
+    let s: String = args.fold(String::new(), |mut buf, next| {
+        buf.push(' ');
+        buf.push('"');
+        buf.extend(next.chars());
+        buf.push('"');
+        buf
+    });
+
+    let environment: Environment = s
         .parse()
         .map_err(|e| format!("parsing environment: {}", e))
         .unwrap();
-
-    dbg!(&environment);
 
     let items = ItemParser { env: &environment }
         .parse(&file)
@@ -119,7 +121,7 @@ fn main() {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Environment {
     named: HashMap<String, String>,
     positional: Vec<String>,
@@ -134,25 +136,20 @@ impl FromStr for Environment {
             positional: Vec::new(),
         };
 
-        let mut iter = SplitWords { src: s.chars() }
-            .map(String::from)
-            .collect::<Vec<_>>();
-
-        dbg!(&iter);
+        let mut iter = SplitWords { src: s.chars() };
 
         // Iterate over each argument.
         // If an argument appears like "-Flag value", create a named argument.
         // Else put the arg in positional vector.
         // Note: Named arguments must have a value.
 
-        let mut iter = iter.into_iter();
-
         while let Some(arg) = iter.next() {
             if arg.starts_with("-") {
                 let name = arg.trim_matches('-').to_owned();
                 if let Some(value) = iter.next() {
+                    dbg!(&value);
                     if value.starts_with("-") {
-                        return Err(format!("{} is missing a value", name).into());
+                        return Err(format!("{} is missing a value", arg).into());
                     }
                     env.named.insert(name, value);
                 }
@@ -220,7 +217,9 @@ impl<'a> ItemParser<'a> {
                         // If arg is "$<identifier>" we lookup the named argument.
                         // If either one doesn't exist we throw up an error.
 
-                        if arg.starts_with('$') {
+                        // TODO(jfm): -Version 0.3.0 + "v$Version" -> "v0.3.0"
+
+                        if arg.contains('$') {
                             if let Ok(index) = arg
                                 .chars()
                                 .skip(1)
@@ -236,11 +235,14 @@ impl<'a> ItemParser<'a> {
                                     }
                                 }
                             } else {
-                                match self.env.named.get(arg.trim_matches('$')) {
-                                    Some(v) => Ok(v.to_owned()),
+                                let mut parts = arg.split('$');
+                                let prefix = parts.next().unwrap().trim();
+                                let index = parts.next().unwrap().trim();
+                                match self.env.named.get(index) {
+                                    Some(v) => Ok(format!("{}{}", prefix, v)),
                                     None => Err(format!(
                                         "no value specified for named argument: {}",
-                                        arg
+                                        index,
                                     )),
                                 }
                             }
@@ -260,13 +262,13 @@ impl<'a> ItemParser<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Cmd {
     name: String,
     args: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Item {
     Comment(String),
     Pipeline { cmds: Vec<Cmd>, literal: String },
@@ -302,6 +304,16 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let mut word = String::new();
         while let Some(next) = self.src.next() {
+            // Grab string literals as a single word, regardless of white
+            // space.
+            if next == '"' {
+                while let Some(next) = self.src.next() {
+                    if next == '"' {
+                        return Some(word);
+                    }
+                    word.push(next);
+                }
+            }
             if next.is_whitespace() {
                 // No point returning empty words.
                 if word.is_empty() {
@@ -309,20 +321,82 @@ where
                 } else {
                     return Some(word);
                 }
-            } else {
-                // Grab string literals as a single word, regardless of white
-                // space.
-                if next == '"' {
-                    while let Some(next) = self.src.next() {
-                        if next == '"' {
-                            return Some(word);
-                        }
-                        word.push(next);
-                    }
-                }
-                word.push(next);
             }
+            word.push(next);
         }
-        None
+        if word.is_empty() {
+            None
+        } else {
+            Some(word)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! map(
+        { $($key:expr => $value:expr),+ } => {
+            {
+                let mut m = ::std::collections::HashMap::new();
+                $(
+                    m.insert($key, $value);
+                )+
+                m
+            }
+         };
+    );
+
+    #[test]
+    fn test_split_words() {
+        let input = r#"-Message "feat: Run files without specifying the extension" -Version 0.3.0"#;
+        let want = vec![
+            "-Message",
+            "feat: Run files without specifying the extension",
+            "-Version",
+            "0.3.0",
+        ];
+        let got: Vec<_> = SplitWords { src: input.chars() }.collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_environment_parsing() {
+        let input = r#"-Message "feat: Run files without specifying the extension" -Version 0.3.0 foo bar baz"#;
+        let positional = vec!["foo", "bar", "baz"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let mut named = HashMap::new();
+        named.insert(
+            "Message".to_owned(),
+            "feat: Run files without specifying the extension".to_owned(),
+        );
+        named.insert("Version".to_owned(), "0.3.0".to_owned());
+        let want = Environment { named, positional };
+        let got = Environment::from_str(input).unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_inline_variables() {
+        let input = r#"ident v$Version ident"#;
+        let want = vec![Item::Pipeline {
+            literal: input.into(),
+            cmds: vec![Cmd {
+                name: "ident".into(),
+                args: vec!["v0.3.0".into(), "ident".into()],
+            }],
+        }];
+        let got = ItemParser {
+            env: &Environment {
+                named: map! {"Version".to_owned() => "0.3.0".to_owned()},
+                positional: vec![],
+            },
+        }
+        .parse(&input)
+        .unwrap();
+        assert_eq!(got, want);
     }
 }
