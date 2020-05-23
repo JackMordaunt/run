@@ -54,7 +54,7 @@ impl<'a> ItemParser<'a> {
     // "cat src/main.rs | rg match | head"
     fn parse_pipeline(&self, fragment: &str) -> Result<Item, String> {
         let cmds = fragment
-            .split("|")
+            .split(" | ")
             .map(|s| SplitWords { src: s.chars() })
             .map(|mut words| -> Result<Cmd, String> {
                 if let Some(name) = words.next() {
@@ -63,71 +63,52 @@ impl<'a> ItemParser<'a> {
                         args: words
                             .map(String::from)
                             .map(|arg| {
-                                // Basically, if arg is "$<numeric>" we parse
+                                // Basically, if arg is "$(<numeric>)" we parse
                                 // the number and lookup the corresponding positional argument.
-                                // If arg is "$<identifier>" we lookup the named argument.
+                                // If arg is "$(<identifier>)" we lookup the named argument.
                                 // If either one doesn't exist we throw up an error.
                                 if arg.contains('$') {
-                                    if let Ok(index) = arg
-                                        .chars()
-                                        .skip(1)
-                                        .next()
-                                        .unwrap()
-                                        .to_string()
-                                        .parse::<usize>()
-                                    {
-                                        match self.env.positional.get(index - 1) {
-                                            Some(v) => Ok(v.to_owned()),
-                                            None => Err(format!(
-                                                "no positional argument given for ${}",
-                                                index
-                                            )),
-                                        }
-                                    } else {
-                                        let mut parts = arg.split('$');
-                                        let (prefix, suffix) =
-                                            (parts.next().unwrap(), parts.next().unwrap());
+                                    // Grab the ident from "$(ident)" and replace with value from environment.
 
-                                        match suffix.find(|c: char| !c.is_alphanumeric()) {
-                                            Some(junction) => {
-                                                let delim = suffix.chars().nth(junction).unwrap();
-                                                let mut suffix =
-                                                    suffix.split(|c: char| !c.is_alphanumeric());
-                                                let index = suffix.next().unwrap();
+                                    let mut ident = String::new();
+                                    let mut prefix = String::new();
+                                    let mut suffix = String::new();
+                                    let mut stream = arg.chars().peekable();
 
-                                                match self.env.named.get(index) {
-                                                    Some(v) => Ok(format!(
-                                                        "{}{}{}{}",
-                                                        prefix,
-                                                        v,
-                                                        delim,
-                                                        suffix.collect::<String>()
-                                                    )),
-                                                    None => Err(format!(
-                                                        "no value specified for named argument: {}",
-                                                        index,
-                                                    )),
+                                    while let Some(c) = stream.next() {
+                                        if c == '$' {
+                                            if let Some(p) = stream.peek() {
+                                                if *p == '(' {
+                                                    stream.next();
+                                                    while let Some(c) = stream.next() {
+                                                        if c == ')' {
+                                                            break;
+                                                        }
+                                                        ident.push(c);
+                                                    }
+                                                    while let Some(c) = stream.next() {
+                                                        suffix.push(c);
+                                                    }
                                                 }
+                                            } else {
+                                                prefix.push(c);
                                             }
-                                            None => {
-                                                let mut suffix =
-                                                    suffix.split(|c: char| !c.is_alphanumeric());
-                                                let index = suffix.next().unwrap();
-
-                                                match self.env.named.get(index) {
-                                                    Some(v) => Ok(format!(
-                                                        "{}{}{}",
-                                                        prefix,
-                                                        v,
-                                                        suffix.collect::<String>()
-                                                    )),
-                                                    None => Err(format!(
-                                                        "no value specified for named argument: {}",
-                                                        index,
-                                                    )),
-                                                }
-                                            }
+                                        } else {
+                                            prefix.push(c);
                                         }
+                                    }
+
+                                    let value = match ident.parse::<usize>() {
+                                        Ok(index) => self.env.positional.get(index - 1),
+                                        Err(_) => self.env.named.get(&ident),
+                                    };
+
+                                    match value {
+                                        Some(value) => Ok(format!("{}{}{}", prefix, value, suffix)),
+                                        None => Err(format!(
+                                            "no value specified for argument: {}",
+                                            ident,
+                                        )),
                                     }
                                 } else {
                                     Ok(arg)
@@ -160,6 +141,7 @@ impl fmt::Display for Cmd {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
 
     macro_rules! map(
         { $($key:expr => $value:expr),+ } => {
@@ -175,7 +157,7 @@ mod tests {
 
     #[test]
     fn test_inline_variables() {
-        let input = r#"ident v$Version $Bin.exe"#;
+        let input = r#"ident v$(Version) $(Bin).exe"#;
         let want = vec![Item::Pipeline {
             literal: input.into(),
             cmds: vec![Cmd {
@@ -195,8 +177,29 @@ mod tests {
     }
 
     #[test]
+    fn test_positional_variable() {
+        let input = r#"ident v$(1) $(2).exe"#;
+        let want = vec![Item::Pipeline {
+            literal: input.into(),
+            cmds: vec![Cmd {
+                name: "ident".into(),
+                args: vec!["v0.3.0".into(), "binary.exe".into()],
+            }],
+        }];
+        let got = ItemParser {
+            env: &Environment {
+                named: HashMap::new(),
+                positional: vec!["0.3.0".into(), "binary".into()],
+            },
+        }
+        .parse(&input)
+        .unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn test_pipeline_parsing() {
-        let input = r#"cat src/main.rs | rg match | head 5"#;
+        let input = r#"cat src/main.rs | rg "|" | head 5"#;
         let want = vec![
             Cmd {
                 name: "cat".into(),
@@ -204,7 +207,7 @@ mod tests {
             },
             Cmd {
                 name: "rg".into(),
-                args: vec!["match".into()],
+                args: vec!["|".into()],
             },
             Cmd {
                 name: "head".into(),
