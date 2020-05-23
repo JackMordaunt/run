@@ -35,7 +35,8 @@ impl<'a> ItemParser<'a> {
     // Note: Reports the first error encountered and discards the rest.
     pub fn parse(&self, s: &str) -> Result<Vec<Item>, String> {
         Ok(s.lines()
-            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
             .map(|s| {
                 if s.starts_with("//") {
                     Ok(vec![Item::Comment(s.into())])
@@ -50,7 +51,7 @@ impl<'a> ItemParser<'a> {
     }
 
     // Parse a pipeline of commands into a pipeline structure.
-    // "cat src/main.rs | rg match | head 20"
+    // "cat src/main.rs | rg match | head"
     fn parse_pipeline(&self, fragment: &str) -> Result<Item, String> {
         let cmds = fragment
             .split("|")
@@ -66,7 +67,6 @@ impl<'a> ItemParser<'a> {
                                 // the number and lookup the corresponding positional argument.
                                 // If arg is "$<identifier>" we lookup the named argument.
                                 // If either one doesn't exist we throw up an error.
-                                // TODO(jfm): -Version 0.3.0 + "v$Version" -> "v0.3.0"
                                 if arg.contains('$') {
                                     if let Ok(index) = arg
                                         .chars()
@@ -85,14 +85,48 @@ impl<'a> ItemParser<'a> {
                                         }
                                     } else {
                                         let mut parts = arg.split('$');
-                                        let prefix = parts.next().unwrap();
-                                        let index = parts.next().unwrap().trim();
-                                        match self.env.named.get(index) {
-                                            Some(v) => Ok(format!("{}{}", prefix, v)),
-                                            None => Err(format!(
-                                                "no value specified for named argument: {}",
-                                                index,
-                                            )),
+                                        let (prefix, suffix) =
+                                            (parts.next().unwrap(), parts.next().unwrap());
+
+                                        match suffix.find(|c: char| !c.is_alphanumeric()) {
+                                            Some(junction) => {
+                                                let delim = suffix.chars().nth(junction).unwrap();
+                                                let mut suffix =
+                                                    suffix.split(|c: char| !c.is_alphanumeric());
+                                                let index = suffix.next().unwrap();
+
+                                                match self.env.named.get(index) {
+                                                    Some(v) => Ok(format!(
+                                                        "{}{}{}{}",
+                                                        prefix,
+                                                        v,
+                                                        delim,
+                                                        suffix.collect::<String>()
+                                                    )),
+                                                    None => Err(format!(
+                                                        "no value specified for named argument: {}",
+                                                        index,
+                                                    )),
+                                                }
+                                            }
+                                            None => {
+                                                let mut suffix =
+                                                    suffix.split(|c: char| !c.is_alphanumeric());
+                                                let index = suffix.next().unwrap();
+
+                                                match self.env.named.get(index) {
+                                                    Some(v) => Ok(format!(
+                                                        "{}{}{}",
+                                                        prefix,
+                                                        v,
+                                                        suffix.collect::<String>()
+                                                    )),
+                                                    None => Err(format!(
+                                                        "no value specified for named argument: {}",
+                                                        index,
+                                                    )),
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
@@ -141,17 +175,17 @@ mod tests {
 
     #[test]
     fn test_inline_variables() {
-        let input = r#"ident v$Version ident"#;
+        let input = r#"ident v$Version $Bin.exe"#;
         let want = vec![Item::Pipeline {
             literal: input.into(),
             cmds: vec![Cmd {
                 name: "ident".into(),
-                args: vec!["v0.3.0".into(), "ident".into()],
+                args: vec!["v0.3.0".into(), "binary.exe".into()],
             }],
         }];
         let got = ItemParser {
             env: &Environment {
-                named: map! {"Version" => "0.3.0"},
+                named: map! {"Version" => "0.3.0", "Bin" => "binary"},
                 positional: vec![],
             },
         }
