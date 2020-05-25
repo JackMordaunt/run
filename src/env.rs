@@ -18,7 +18,9 @@ impl FromStr for Environment {
             positional: Vec::new(),
         };
 
-        let mut iter = SplitWords { src: s.chars() };
+        let mut iter = SplitWords {
+            src: s.chars().peekable(),
+        };
 
         // Iterate over each argument.
         // If an argument appears like "-Flag value", create a named argument.

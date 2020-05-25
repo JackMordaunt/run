@@ -1,17 +1,25 @@
 use crate::env::Environment;
 use crate::util::SplitWords;
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Debug, PartialEq)]
 pub struct Cmd {
-    pub name: String,
+    pub name: String, // Should this actually be a PathBuf?
     pub args: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Item {
     Comment(String),
-    Pipeline { cmds: Vec<Cmd>, literal: String },
+    Pipeline {
+        cmds: Vec<Cmd>,
+        // Terminus is the final destination for a pipeline.
+        // Specifies to stream output into the file.
+        terminus: Option<PathBuf>,
+        ignore_failure: bool,
+        literal: String,
+    },
 }
 
 pub struct ItemParser<'a> {
@@ -51,82 +59,107 @@ impl<'a> ItemParser<'a> {
     }
 
     // Parse a pipeline of commands into a pipeline structure.
-    // "cat src/main.rs | rg match | head"
-    fn parse_pipeline(&self, fragment: &str) -> Result<Item, String> {
-        let cmds = fragment
-            .split(" | ")
-            .map(|s| SplitWords { src: s.chars() })
+    // "cat src/main.rs | rg match | head > output.txt"
+    fn parse_pipeline(&self, s: &str) -> Result<Item, String> {
+        let literal = s;
+
+        let (s, ignore_failure) = if s.starts_with("- ") {
+            (s.trim_start_matches("- "), true)
+        } else {
+            (s, false)
+        };
+
+        let mut terminus = None;
+        let mut cmds = s.split(" | ").collect::<Vec<_>>();
+
+        let last = match cmds.last() {
+            Some(last) => last,
+            None => return Err("no commands to parse".into()),
+        };
+
+        // If the final command contains a " > ", break it off and use it as the
+        // terminus redirection.
+        // Note: Doesn't consider bad input like " > > ".
+        if let Some(index) = last.find(" > ") {
+            let (last, t) = last.split_at(index);
+            cmds.remove(cmds.len() - 1);
+            cmds.push(last);
+            terminus = Some(t.trim_start_matches(" > ").into());
+        }
+
+        let cmds = cmds
+            .into_iter()
+            .map(|s| SplitWords {
+                src: s.chars().peekable(),
+            })
             .map(|mut words| -> Result<Cmd, String> {
-                if let Some(name) = words.next() {
-                    let cmd = Cmd {
+                match words.next() {
+                    Some(name) => Ok(Cmd {
                         name: name.to_owned(),
                         args: words
                             .map(String::from)
-                            .map(|arg| {
-                                // Basically, if arg is "$(<numeric>)" we parse
-                                // the number and lookup the corresponding positional argument.
-                                // If arg is "$(<identifier>)" we lookup the named argument.
-                                // If either one doesn't exist we throw up an error.
-                                if arg.contains('$') {
-                                    // Grab the ident from "$(ident)" and replace with value from environment.
-
-                                    let mut ident = String::new();
-                                    let mut prefix = String::new();
-                                    let mut suffix = String::new();
-                                    let mut stream = arg.chars().peekable();
-
-                                    while let Some(c) = stream.next() {
-                                        if c == '$' {
-                                            if let Some(p) = stream.peek() {
-                                                if *p == '(' {
-                                                    stream.next();
-                                                    while let Some(c) = stream.next() {
-                                                        if c == ')' {
-                                                            break;
-                                                        }
-                                                        ident.push(c);
-                                                    }
-                                                    while let Some(c) = stream.next() {
-                                                        suffix.push(c);
-                                                    }
-                                                }
-                                            } else {
-                                                prefix.push(c);
-                                            }
-                                        } else {
-                                            prefix.push(c);
-                                        }
-                                    }
-
-                                    let value = match ident.parse::<usize>() {
-                                        Ok(index) => self.env.positional.get(index - 1),
-                                        Err(_) => self.env.named.get(&ident),
-                                    };
-
-                                    match value {
-                                        Some(value) => Ok(format!("{}{}{}", prefix, value, suffix)),
-                                        None => Err(format!(
-                                            "no value specified for argument: {}",
-                                            ident,
-                                        )),
-                                    }
-                                } else {
-                                    Ok(arg)
-                                }
-                            })
+                            .map(|arg| self.parse_argument(arg))
                             .collect::<Result<Vec<_>, _>>()?,
-                    };
-                    Ok(cmd)
-                } else {
-                    Err("empty command".into())
+                    }),
+                    None => Err("empty command".into()),
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Item::Pipeline {
             cmds,
-            literal: fragment.trim().into(),
+            terminus,
+            ignore_failure,
+            literal: literal.into(),
         })
+    }
+
+    fn parse_argument(&self, arg: String) -> Result<String, String> {
+        // Basically, if arg is "$(<numeric>)" we parse
+        // the number and lookup the corresponding positional argument.
+        // If arg is "$(<identifier>)" we lookup the named argument.
+        // If either one doesn't exist we throw up an error.
+        if arg.contains('$') {
+            let mut ident = String::new();
+            let mut prefix = String::new();
+            let mut suffix = String::new();
+            let mut stream = arg.chars().peekable();
+
+            while let Some(c) = stream.next() {
+                if c == '$' {
+                    if let Some(p) = stream.peek() {
+                        if *p == '(' {
+                            stream.next();
+                            while let Some(c) = stream.next() {
+                                if c == ')' {
+                                    break;
+                                }
+                                ident.push(c);
+                            }
+                            while let Some(c) = stream.next() {
+                                suffix.push(c);
+                            }
+                        }
+                    } else {
+                        prefix.push(c);
+                    }
+                } else {
+                    prefix.push(c);
+                }
+            }
+
+            let value = match ident.parse::<usize>() {
+                Ok(index) => self.env.positional.get(index - 1),
+                Err(_) => self.env.named.get(&ident),
+            };
+
+            match value {
+                Some(value) => Ok(format!("{}{}{}", prefix, value, suffix)),
+                None => Err(format!("no value specified for argument: {}", ident,)),
+            }
+        } else {
+            Ok(arg)
+        }
     }
 }
 
@@ -159,6 +192,8 @@ mod tests {
     fn test_inline_variables() {
         let input = r#"ident v$(Version) $(Bin).exe"#;
         let want = vec![Item::Pipeline {
+            ignore_failure: false,
+            terminus: None,
             literal: input.into(),
             cmds: vec![Cmd {
                 name: "ident".into(),
@@ -180,6 +215,8 @@ mod tests {
     fn test_positional_variable() {
         let input = r#"ident v$(1) $(2).exe"#;
         let want = vec![Item::Pipeline {
+            ignore_failure: false,
+            terminus: None,
             literal: input.into(),
             cmds: vec![Cmd {
                 name: "ident".into(),
@@ -222,6 +259,41 @@ mod tests {
         assert_eq!(
             got,
             vec![Item::Pipeline {
+                ignore_failure: false,
+                terminus: None,
+                cmds: want,
+                literal: input.into()
+            }]
+        );
+    }
+
+    #[test]
+    fn test_file_redirection() {
+        let input = r#"cat src/main.rs | rg match | head 5 > output.txt"#;
+        let want = vec![
+            Cmd {
+                name: "cat".into(),
+                args: vec!["src/main.rs".into()],
+            },
+            Cmd {
+                name: "rg".into(),
+                args: vec!["match".into()],
+            },
+            Cmd {
+                name: "head".into(),
+                args: vec!["5".into()],
+            },
+        ];
+        let got = ItemParser {
+            env: &Environment::default(),
+        }
+        .parse(&input)
+        .expect("parsing");
+        assert_eq!(
+            got,
+            vec![Item::Pipeline {
+                ignore_failure: false,
+                terminus: Some("output.txt".into()),
                 cmds: want,
                 literal: input.into()
             }]
@@ -242,6 +314,8 @@ mod tests {
         "#;
         let want = vec![
             Item::Pipeline {
+                ignore_failure: false,
+                terminus: None,
                 cmds: vec![Cmd {
                     name: "one".into(),
                     args: vec![],
@@ -249,6 +323,8 @@ mod tests {
                 literal: "one".into(),
             },
             Item::Pipeline {
+                ignore_failure: false,
+                terminus: None,
                 cmds: vec![Cmd {
                     name: "two".into(),
                     args: vec![],
@@ -256,6 +332,8 @@ mod tests {
                 literal: "two".into(),
             },
             Item::Pipeline {
+                ignore_failure: false,
+                terminus: None,
                 cmds: vec![Cmd {
                     name: "three".into(),
                     args: vec![],
@@ -269,5 +347,38 @@ mod tests {
         .parse(&input)
         .expect("parsing");
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ignore_failure() {
+        let input = r#"- cat src/main.rs | rg match | head 5 > output.txt"#;
+        let want = vec![
+            Cmd {
+                name: "cat".into(),
+                args: vec!["src/main.rs".into()],
+            },
+            Cmd {
+                name: "rg".into(),
+                args: vec!["match".into()],
+            },
+            Cmd {
+                name: "head".into(),
+                args: vec!["5".into()],
+            },
+        ];
+        let got = ItemParser {
+            env: &Environment::default(),
+        }
+        .parse(&input)
+        .expect("parsing");
+        assert_eq!(
+            got,
+            vec![Item::Pipeline {
+                ignore_failure: true,
+                terminus: Some("output.txt".into()),
+                cmds: want,
+                literal: input.into()
+            }]
+        );
     }
 }
