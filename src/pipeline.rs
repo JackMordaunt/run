@@ -38,6 +38,20 @@ where
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(|e| format!("rm {}: {}", args.join(" "), e))?;
                     }
+                    "cp" => {
+                        let mut args = args.into_iter();
+                        let (src, dst) = (args.next(), args.next());
+                        match (src, dst) {
+                            (Some(src), Some(dst)) => {
+                                cp(src, dst).map_err(|e| format!("cp {} {}: {}", src, dst, e))?;
+                            }
+                            _ => {
+                                return Err(
+                                    format!("cp: invalid arguments: {:?} {:?}", src, dst).into()
+                                );
+                            }
+                        };
+                    }
                     _ => {
                         let stdin = prev.map_or(Stdio::inherit(), |output: Child| {
                             Stdio::from(output.stdout.unwrap())
@@ -91,5 +105,10 @@ fn rm(pattern: &str) -> Result<(), Box<dyn Error>> {
         .into_iter()
         .map(|entry| std::fs::remove_file(&entry))
         .collect::<Result<Vec<_>, _>>()?;
+    Ok(())
+}
+
+fn cp(src: &str, dst: &str) -> Result<(), Box<dyn Error>> {
+    std::fs::copy(src, dst)?;
     Ok(())
 }
